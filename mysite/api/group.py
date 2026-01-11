@@ -1,9 +1,9 @@
 from fastapi import HTTPException, Depends, APIRouter
-from mysite.database.models import GroupPeople, ChatGroup, UserProfile, StatusChoices
-from mysite.database.schema import GroupPeopleCreateSchema, GroupPeopleOutSchema
+from mysite.database.models import ChatGroup, UserProfile, StatusChoices, ChatMessage
+from mysite.database.schema import ChatGroupCreateSchema, ChatGroupOutSchema, ChatMessageOutSchema
 from mysite.database.db import SessionLocal
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Dict, Any
 
 
 async def get_db():
@@ -14,122 +14,88 @@ async def get_db():
         db.close()
 
 
-group_router = APIRouter(prefix='/people', tags=['Group People'])
+group_router = APIRouter(prefix='/group', tags=['Chat Group'])
 
 
-def check_add_permission(group_id: int, current_user_id: int, db: Session):
+def check_group_owner(group_id: int, user_id: int, db: Session):
     group = db.query(ChatGroup).filter(ChatGroup.id == group_id).first()
     if not group:
         raise HTTPException(status_code=404, detail='Группа табылган жок')
 
-    user = db.query(UserProfile).filter(UserProfile.id == current_user_id).first()
+    user = db.query(UserProfile).filter(UserProfile.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail='Колдонуучу табылган жок')
 
-    if group.owner_id != current_user_id and user.user_status != StatusChoices.admin:
-        raise HTTPException(status_code=403, detail='Адамдарды кошууга укук жок')
+    # Проверка: либо владелец группы, либо админ
+    if group.owner_id != user_id and user.user_status != StatusChoices.admin:
+        raise HTTPException(status_code=403, detail='Бул группаны башкарууга укук жок')
 
     return group
 
 
 @group_router.post('/', response_model=dict)
-async def people_create(people: GroupPeopleCreateSchema,
-                        current_user_id: int, db: Session = Depends(get_db)):
-    check_add_permission(people.group_id, current_user_id, db)
+async def group_create(group: ChatGroupCreateSchema, db: Session = Depends(get_db)):
+    owner = db.query(UserProfile).filter(UserProfile.id == group.owner_id).first()
+    if not owner:
+        raise HTTPException(status_code=404, detail='Ээси табылган жок')
 
-    user = db.query(UserProfile).filter(UserProfile.id == people.user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail='Колдонуучу табылган жок')
-
-    existing = db.query(GroupPeople).filter(
-        GroupPeople.group_id == people.group_id,
-        GroupPeople.user_id == people.user_id
-    ).first()
-    if existing:
-        raise HTTPException(status_code=400, detail='Колдонуучу буга чейин группага кошулган')
-
-    people_db = GroupPeople(**people.dict())
-    db.add(people_db)
+    group_db = ChatGroup(**group.dict())
+    db.add(group_db)
     db.commit()
-    db.refresh(people_db)
+    db.refresh(group_db)
     return {'message': 'Saved'}
 
 
-@group_router.get('/', response_model=List[GroupPeopleOutSchema])
-async def people_list(db: Session = Depends(get_db)):
-    return db.query(GroupPeople).all()
+@group_router.get('/', response_model=List[ChatGroupOutSchema])
+async def group_list(db: Session = Depends(get_db)):
+    return db.query(ChatGroup).all()
 
 
-@group_router.get('/{people_id}', response_model=GroupPeopleOutSchema)
-async def people_detail(people_id: int, db: Session = Depends(get_db)):
-    people_db = db.query(GroupPeople).filter(GroupPeople.id == people_id).first()
-    if not people_db:
-        raise HTTPException(status_code=404, detail='Маалымат табылган жок')
-    return people_db
-
-
-@group_router.put('/{people_id}', response_model=GroupPeopleOutSchema)
-async def people_update(people_id: int, people: GroupPeopleCreateSchema,
-                        current_user_id: int, db: Session = Depends(get_db)):
-    people_db = db.query(GroupPeople).filter(GroupPeople.id == people_id).first()
-    if not people_db:
-        raise HTTPException(status_code=404, detail='Маалымат табылган жок')
-
-    check_add_permission(people.group_id, current_user_id, db)
-
-    group = db.query(ChatGroup).filter(ChatGroup.id == people.group_id).first()
-    if not group:
+@group_router.get('/{group_id}', response_model=Dict[str, Any])
+async def group_detail(group_id: int, db: Session = Depends(get_db)):
+    group_db = db.query(ChatGroup).filter(ChatGroup.id == group_id).first()
+    if not group_db:
         raise HTTPException(status_code=404, detail='Группа табылган жок')
 
-    user = db.query(UserProfile).filter(UserProfile.id == people.user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail='Колдонуучу табылган жок')
+    messages = db.query(ChatMessage).filter(ChatMessage.group_id == group_id).all()
 
-    for people_key, people_value in people.dict().items():
-        setattr(people_db, people_key, people_value)
+    return {
+        'group': ChatGroupOutSchema.from_orm(group_db),
+        'messages': [ChatMessageOutSchema.from_orm(msg) for msg in messages]
+    }
 
-    db.add(people_db)
+
+@group_router.put('/{group_id}', response_model=ChatGroupOutSchema)
+async def group_update(group_id: int, group: ChatGroupCreateSchema,
+                       current_user_id: int, db: Session = Depends(get_db)):
+    group_db = check_group_owner(group_id, current_user_id, db)
+
+    owner = db.query(UserProfile).filter(UserProfile.id == group.owner_id).first()
+    if not owner:
+        raise HTTPException(status_code=404, detail='Ээси табылган жок')
+
+    for group_key, group_value in group.dict().items():
+        setattr(group_db, group_key, group_value)
+
+    db.add(group_db)
     db.commit()
-    db.refresh(people_db)
-    return people_db
+    db.refresh(group_db)
+    return group_db
 
 
-@group_router.delete('/{people_id}')
-async def people_delete(people_id: int, current_user_id: int, db: Session = Depends(get_db)):
-    people_db = db.query(GroupPeople).filter(GroupPeople.id == people_id).first()
-    if people_db is None:
-        raise HTTPException(status_code=404, detail='Андай маалымат жок')
+@group_router.delete('/{group_id}')
+async def group_delete(group_id: int, current_user_id: int, db: Session = Depends(get_db)):
+    group_db = check_group_owner(group_id, current_user_id, db)
 
-    group = db.query(ChatGroup).filter(ChatGroup.id == people_db.group_id).first()
-    user = db.query(UserProfile).filter(UserProfile.id == current_user_id).first()
-
-    can_delete = (
-            group.owner_id == current_user_id or
-            user.user_status == StatusChoices.admin or
-            people_db.user_id == current_user_id
-    )
-
-    if not can_delete:
-        raise HTTPException(status_code=403, detail='Адамды чыгарууга укук жок')
-
-    db.delete(people_db)
+    db.delete(group_db)
     db.commit()
     return {'message': 'Deleted'}
 
 
-@group_router.get('/group/{group_id}', response_model=List[GroupPeopleOutSchema])
-async def people_by_group(group_id: int, db: Session = Depends(get_db)):
-    group = db.query(ChatGroup).filter(ChatGroup.id == group_id).first()
-    if not group:
-        raise HTTPException(status_code=404, detail='Группа табылган жок')
-
-    return db.query(GroupPeople).filter(GroupPeople.group_id == group_id).all()
-
-
-@group_router.get('/user/{user_id}', response_model=List[GroupPeopleOutSchema])
-async def groups_by_user(user_id: int, db: Session = Depends(get_db)):
-    user = db.query(UserProfile).filter(UserProfile.id == user_id).first()
-    if not user:
+@group_router.get('/owner/{owner_id}', response_model=List[ChatGroupOutSchema])
+async def groups_by_owner(owner_id: int, db: Session = Depends(get_db)):
+    owner = db.query(UserProfile).filter(UserProfile.id == owner_id).first()
+    if not owner:
         raise HTTPException(status_code=404, detail='Колдонуучу табылган жок')
 
-    return db.query(GroupPeople).filter(GroupPeople.user_id == user_id).all()
+    return db.query(ChatGroup).filter(ChatGroup.owner_id == owner_id).all()
