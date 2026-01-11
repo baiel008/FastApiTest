@@ -1,5 +1,5 @@
 from fastapi import HTTPException, Depends, APIRouter
-from mysite.database.models import ChatGroup, UserProfile, StatusChoices, ChatMessage
+from mysite.database.models import ChatGroup, UserProfile, StatusChoices, ChatMessage, GroupPeople
 from mysite.database.schema import ChatGroupCreateSchema, ChatGroupOutSchema, ChatMessageOutSchema
 from mysite.database.db import SessionLocal
 from sqlalchemy.orm import Session
@@ -26,7 +26,6 @@ def check_group_owner(group_id: int, user_id: int, db: Session):
     if not user:
         raise HTTPException(status_code=404, detail='Колдонуучу табылган жок')
 
-    # Проверка: либо владелец группы, либо админ
     if group.owner_id != user_id and user.user_status != StatusChoices.admin:
         raise HTTPException(status_code=403, detail='Бул группаны башкарууга укук жок')
 
@@ -59,9 +58,13 @@ async def group_detail(group_id: int, db: Session = Depends(get_db)):
 
     messages = db.query(ChatMessage).filter(ChatMessage.group_id == group_id).all()
 
+    people_count = db.query(GroupPeople).filter(GroupPeople.group_id == group_id).count()
+
     return {
         'group': ChatGroupOutSchema.from_orm(group_db),
-        'messages': [ChatMessageOutSchema.from_orm(msg) for msg in messages]
+        'messages': [ChatMessageOutSchema.from_orm(msg) for msg in messages],
+        'people_count': people_count
+
     }
 
 
